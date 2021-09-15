@@ -90,7 +90,7 @@ class ColorTracker(object):
         self._tracked_object_id_count += 1
         self._tracked_objects.append(tracked_obj)
 
-    def track(self, camera: Union[Camera, cv2.VideoCapture], hsv_lower_value: Union[np.ndarray, List[int]],
+    def track(self, frames, hsv_lower_value: Union[np.ndarray, List[int]],
               hsv_upper_value: Union[np.ndarray, List[int]], min_contour_area: Union[float, int] = 0,
               kernel: np.ndarray = None, horizontal_flip: bool = True, max_track_point_distance: int = 100,
               max_skipped_frames: int = 24):
@@ -109,74 +109,79 @@ class ColorTracker(object):
         self._is_running = True
 
         while True:
-            self._frame = self._read_from_camera(camera, horizontal_flip)
+            for frame in frames:
+                self._frame = frame
 
-            if self._frame_preprocessor is not None:
-                self._frame = self._frame_preprocessor(self._frame)
+                if self._frame_preprocessor is not None:
+                    self._frame = self._frame_preprocessor(self._frame)
 
-            if (self._selection_points is not None) and (len(self._selection_points) > 0):
-                self._frame = helpers.crop_out_polygon_convex(self._frame, self._selection_points)
+                if (self._selection_points is not None) and (len(self._selection_points) > 0):
+                    self._frame = helpers.crop_out_polygon_convex(self._frame, self._selection_points)
 
-            contours = helpers.find_object_contours(image=self._frame,
-                                                    hsv_lower_value=hsv_lower_value,
-                                                    hsv_upper_value=hsv_upper_value,
-                                                    kernel=kernel)
+                contours = helpers.find_object_contours(image=self._frame,
+                                                        hsv_lower_value=hsv_lower_value,
+                                                        hsv_upper_value=hsv_upper_value,
+                                                        kernel=kernel)
 
-            contours = helpers.filter_contours_by_area(contours, min_contour_area)
-            contours = helpers.sort_contours_by_area(contours)
-            if self._max_nb_of_objects is not None and self._max_nb_of_objects > 0:
-                contours = contours[:self._max_nb_of_objects]
-            bboxes = helpers.get_bbox_for_contours(contours)
-            object_centers = helpers.get_contour_centers(contours)
+                contours = helpers.filter_contours_by_area(contours, min_contour_area)
+                contours = helpers.sort_contours_by_area(contours)
+                if self._max_nb_of_objects is not None and self._max_nb_of_objects > 0:
+                    contours = contours[:self._max_nb_of_objects]
+                bboxes = helpers.get_bbox_for_contours(contours)
+                object_centers = helpers.get_contour_centers(contours)
 
-            # Init the list of tracked objects if it's empty
-            if len(self._tracked_objects) == 0:
-                for obj_center in object_centers:
-                    self._init_new_tracked_object(obj_center)
+                # Init the list of tracked objects if it's empty
+                if len(self._tracked_objects) == 0:
+                    for obj_center in object_centers:
+                        self._init_new_tracked_object(obj_center)
 
-            # Constructing cost matrix (matrix with the distances from points to other points)
-            cost_mtx = helpers.calculate_distance_mtx(self._tracked_objects, object_centers)
+                # Constructing cost matrix (matrix with the distances from points to other points)
+                cost_mtx = helpers.calculate_distance_mtx(self._tracked_objects, object_centers)
 
-            # Solve assignment problem
-            assignment = helpers.solve_assignment(cost_mtx)
+                # Solve assignment problem
+                assignment = helpers.solve_assignment(cost_mtx)
 
-            # Refine assignment list and objects's skipped frames
-            for i in range(len(assignment)):
-                if assignment[i] != -1:
-                    if cost_mtx[i][assignment[i]] > max_track_point_distance:
-                        assignment[i] = -1
-                else:
-                    self._tracked_objects[i].skipped_frames += 1
+                # Refine assignment list and objects's skipped frames
+                for i in range(len(assignment)):
+                    if assignment[i] != -1:
+                        if cost_mtx[i][assignment[i]] > max_track_point_distance:
+                            assignment[i] = -1
+                    else:
+                        self._tracked_objects[i].skipped_frames += 1
 
-            # Remove tracked object if the object skipped to many frames, so it was not detected
-            helpers.remove_object_if_too_many_frames_skipped(self._tracked_objects, assignment, max_skipped_frames)
+                # Remove tracked object if the object skipped to many frames, so it was not detected
+                helpers.remove_object_if_too_many_frames_skipped(self._tracked_objects, assignment, max_skipped_frames)
 
-            # Check for new objects and initialize them
-            un_assigned_detections = [i for i in range(len(object_centers)) if i not in assignment]
-            if len(un_assigned_detections) != 0:
-                if len(self._tracked_objects) < self._max_nb_of_objects:
-                    for i in un_assigned_detections:
-                        self._init_new_tracked_object(object_centers[i])
+                # Check for new objects and initialize them
+                un_assigned_detections = [i for i in range(len(object_centers)) if i not in assignment]
+                if len(un_assigned_detections) != 0:
+                    if len(self._tracked_objects) < self._max_nb_of_objects:
+                        for i in un_assigned_detections:
+                            self._init_new_tracked_object(object_centers[i])
 
-            # Refresh tracked objects (reset "skipped frames" counter and add new object center to the queue)
-            for i in range(len(assignment)):
-                if assignment[i] != -1:
-                    self._tracked_objects[i].skipped_frames = 0
-                    self._tracked_objects[i].add_point(object_centers[assignment[i]])
+                # Refresh tracked objects (reset "skipped frames" counter and add new object center to the queue)
+                for i in range(len(assignment)):
+                    if assignment[i] != -1:
+                        self._tracked_objects[i].skipped_frames = 0
+                        self._tracked_objects[i].add_point(object_centers[assignment[i]])
 
-                    if len(contours) > i:
-                        self._tracked_objects[i].last_object_contour = contours[i]
-                        self._tracked_objects[i].last_bbox = bboxes[i]
+                        if len(contours) > i:
+                            self._tracked_objects[i].last_object_contour = contours[i]
+                            self._tracked_objects[i].last_bbox = bboxes[i]
 
-            if self._debug:
-                self._debug_frame = self._frame.copy()
-                for i, tracked_obj in enumerate(self._tracked_objects):
-                    self._debug_frame = visualize.draw_debug_frame_for_object(self._debug_frame,
-                                                                              tracked_obj,
-                                                                              self._debug_colors[i])
+                if self._debug:
+                    self._debug_frame = self._frame.copy()
+                    for i, tracked_obj in enumerate(self._tracked_objects):
+                        self._debug_frame = visualize.draw_debug_frame_for_object(self._debug_frame,
+                                                                                  tracked_obj,
+                                                                                  self._debug_colors[i])
 
-            if self._tracking_callback is not None:
-                self._tracking_callback(self)
+                if self._tracking_callback is not None:
+                    self._tracking_callback(self)
 
+                if not self._is_running:
+                    return
+
+            # because Im killing the frame generator too early, causing the inner loop to exit
             if not self._is_running:
-                break
+                return
